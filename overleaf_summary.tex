@@ -1,0 +1,235 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,graphicx,hyperref,booktabs}
+\usepackage[margin=1in]{geometry}
+
+\title{Unified Pipeline for Sensory--Motor Information Transfer and Predictive Modeling in \textit{C. elegans}}
+\author{Anthony Fisher}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose and scientific motivation}
+Nervous systems exhibit a strong disparity between the bandwidth of peripheral sensory encoding and the bandwidth of behavior. In humans, a proposed behavioral ``speed limit'' is on the order of $10$ bits/s (the ``sifting number''). The goal of this pipeline is to implement a research-grade, reproducible analysis workflow for \textit{C. elegans} whole-brain calcium imaging that (i) quantifies statistical dependence between sensory and motor neurons using information-theoretic metrics and (ii) builds predictive models of a motor neuron's calcium trajectory using weighted contributions from sensory neurons, interneurons, and motor neurons, with explicit controls for photobleaching artifacts and estimator bias.
+
+\section{Data model and preprocessing}
+We consider time series $S(t)$ and $M(t)$, representing calcium fluorescence-derived activity (after preprocessing) for a source neuron (often sensory) and a target neuron (often motor). Preprocessing consists of:
+\begin{enumerate}
+  \item \textbf{NaN interpolation} for missing values.
+  \item \textbf{Photobleaching correction} via a rolling low percentile baseline $\hat{b}(t)$ (percentile filter), producing $x'(t)=x(t)-\hat{b}(t)$.
+  \item \textbf{Robust z-score normalization}:
+  \[
+  z(t)=\frac{x'(t)-\mathrm{median}(x')}{1.4826\,\mathrm{MAD}(x')},
+  \]
+  falling back to standard deviation if MAD is near zero.
+\end{enumerate}
+This reduces shared slow drift (a major confound in MI/TE estimation) while preserving transient dynamics.
+
+\section{Lag optimization and correlation}
+To account for delays in information transfer, we evaluate correlation between $S(t)$ and delayed versions of $M(t)$:
+\[
+r(\tau)=\frac{\sum_{t}(S(t)-\bar{S})(M(t+\tau)-\bar{M}_{\tau})}{\sqrt{\sum_t(S(t)-\bar{S})^2}\sqrt{\sum_t(M(t+\tau)-\bar{M}_{\tau})^2}}.
+\]
+Two lag-selection modes are implemented:
+\begin{itemize}
+  \item \textbf{Simple scan}: choose $\tau^\star=\arg\max_{\tau\in[0,\tau_{\max}]} |r(\tau)|$.
+  \item \textbf{Nested blocked selection (recommended)}: choose $\tau^\star$ using an \emph{inner} blocked validation split within a training block, then report $r$ on a held-out \emph{outer} test block. This reduces optimistic bias from selecting $\tau$ on the same samples used for evaluation.
+\end{itemize}
+
+\section{Entropy and mutual information}
+After discretization into $B$ bins (quantile binning), entropy is
+\[
+H(X)=-\sum_i p(x_i)\log_2 p(x_i).
+\]
+Mutual information (MI) between discretized $S$ and $M$ is
+\[
+I(S;M)=\sum_{s,m} p(s,m)\log_2\frac{p(s,m)}{p(s)p(m)}.
+\]
+The pipeline reports:
+\begin{itemize}
+  \item \textbf{Discrete MI} using the above plug-in estimator on a \emph{held-out} segment.
+  \item \textbf{Continuous MI (bits)} using a kNN-style estimator proxy (via \texttt{mutual\_info\_regression}) symmetrized:
+  \[
+  I_{\text{cont}}(S;M)\approx \frac{1}{2}\frac{I(S\rightarrow M)+I(M\rightarrow S)}{\ln 2}.
+  \]
+  \item \textbf{MI vs bins} curve $I_B(S;M)$ for $B=2,\dots,B_{\max}$ to diagnose binning sensitivity/overfitting.
+\end{itemize}
+
+\section{Transfer entropy}
+Transfer entropy (TE) measures directed, time-asymmetric dependence:
+\[
+T_{S\to M}=\sum p(m_t,m_{t-1},s_{t-\tau})\log_2\frac{p(m_t\mid m_{t-1},s_{t-\tau})}{p(m_t\mid m_{t-1})}.
+\]
+We implement a discrete plug-in estimator using a 3D count tensor over $(m_t,m_{t-1},s_{t-\tau})$. \textbf{Limitations:} TE is sensitive to finite-sample bias and nonstationarity; thus TE values should be interpreted alongside surrogate controls and stability checks.
+
+\section{Gaussian predictive information (linear TE analogue)}
+To provide a more stable directed-predictive metric, we compute the \emph{Gaussian conditional predictive information}:
+\[
+I_G = \frac{1}{2}\log_2\frac{\mathrm{Var}(e_{\text{base}})}{\mathrm{Var}(e_{\text{full}})},
+\]
+where:
+\begin{align*}
+\text{Base model: } & m_t \approx f(m_{t-1},\dots,m_{t-k}) \\
+\text{Full model: } & m_t \approx g(m_{t-1},\dots,m_{t-k}, s_{t-\tau-1},\dots,s_{t-\tau-k})
+\end{align*}
+and $e_{\text{base}}$ and $e_{\text{full}}$ are test-set residuals of ridge regressions. $I_G$ behaves like a linear-Gaussian TE: it quantifies the unique predictive power of the source history beyond the target's own history.
+
+\section{Surrogate nulls and multiple-comparison correction}
+To guard against spurious coupling from shared drift or periodic artifacts, we compute a surrogate null distribution of the \emph{full lag-selection pipeline} via circularly shifting the target trace:
+\[
+M^{(k)}(t)=M(t+\Delta_k),
+\]
+and recomputing $r_{\text{test}}$ under each surrogate. The empirical p-value is:
+\[
+p=\frac{1+\#\{|r^{(k)}|\ge |r_{\text{obs}}|\}}{K+1}.
+\]
+When screening many sensory$\times$motor pairs, we apply Benjamini--Hochberg FDR control to obtain $q$-values.
+
+\section{Predictive modeling of calcium trajectories}
+We build supervised models to predict a target neuron's trajectory. The design matrix includes lag blocks:
+\[
+X_t = [\underbrace{m_{t-1},\dots,m_{t-L}}_{\text{optional target history}},\underbrace{x^{(1)}_{t},x^{(1)}_{t-1},\dots,x^{(1)}_{t-L}}_{\text{source 1}}, \dots ],
+\]
+with optional stimulus regressors (for periodic stimulation datasets) and optional atlas-kernel filtered regressors (if kernel parameters exist).
+
+Models:
+\begin{itemize}
+  \item \textbf{ElasticNetCV} with time-series cross-validation (TimeSeriesSplit).
+  \item \textbf{MLPRegressor} as a nonlinear baseline with early stopping.
+\end{itemize}
+Performance is reported as held-out $R^2$ on the blocked test segment.
+
+\paragraph{Weighted contributions.}
+We compute \emph{grouped permutation importance} by permuting all features belonging to one source neuron and measuring the drop in test $R^2$:
+\[
+\Delta R^2_i = R^2_{\text{base}}-R^2_{\text{perm}(i)}.
+\]
+Percent contribution:
+\[
+w_i = 100\frac{\max(\Delta R^2_i,0)}{\sum_j \max(\Delta R^2_j,0)}.
+\]
+These weights quantify \emph{predictive contribution}, not information-theoretic decomposition.
+
+\section{How to run the code}
+\begin{enumerate}
+  \item Unzip the project folder.
+  \item Open \texttt{Final\_celegans\_pipeline.ipynb}.
+  \item Set \texttt{EXTRA\_ROOTS} to folders containing \texttt{exported\_data/} and/or BrainScanner folders.
+  \item Choose dataset type (\texttt{DATASET\_SOURCE}), ID (\texttt{EXPORTED\_EXP\_ID}), and toggles.
+  \item Run the end-to-end section to produce tables and plots.
+  \item Enable multi-dataset training (\texttt{RUN\_MULTI=True}) to train on IDs $0..112$ and test on a held-out dataset.
+\end{enumerate}
+
+\section{What this informs and why it is useful}
+\begin{itemize}
+  \item Identifies sensory$\to$motor candidate pairs with delayed coupling supported by held-out metrics and surrogate significance.
+  \item Quantifies shared dependence in bits (MI) and directed predictive value (TE/Gaussian PI), directly tied to the project's ``bits transferred'' framing.
+  \item Builds a predictive model of motor neuron dynamics and reports which neurons contribute most to prediction.
+  \item Supports ablations (interneurons on/off, target history on/off) to quantify the incremental value of network context.
+\end{itemize}
+
+\section{Advantages}
+\begin{itemize}
+  \item Explicit bias controls: nested lag selection, held-out evaluation, surrogate nulls, FDR correction.
+  \item Artifact mitigation: photobleach correction and robust scaling.
+  \item Interpretability: contributor weights via grouped permutation importance.
+  \item Extensible: optional atlas integration and multi-dataset training.
+\end{itemize}
+
+\section{Limitations and where information theory is insufficient}
+\begin{itemize}
+  \item Plug-in MI/TE estimators can be biased for small sample sizes and nonstationary signals; surrogate tests mitigate but do not fully eliminate bias.
+  \item Calcium imaging is a proxy for spiking; temporal filtering (indicator kinetics) blurs causal timing.
+  \item MI/TE do not alone establish anatomical causality (common input and latent variables remain).
+  \item For prediction, high $R^2$ can reflect shared stimulus drive or global states; ablations and stimulus regressors help separate these effects.
+\end{itemize}
+
+\section{Model definitions: linear, neural, and atlas-only}
+The pipeline compares three predictive model families, each corresponding to a different hypothesis about the origin of the target neuron's dynamics.
+
+\paragraph{Linear model (ElasticNet).}
+The \textbf{linear} curve is produced by an ElasticNet regression trained with time-series cross-validation. The design matrix contains lagged blocks of contributor neurons (and optional target history), optionally augmented with stimulus indicators and atlas-filtered regressors. ElasticNet solves:
+\[
+\hat{\beta}=\arg\min_{\beta}\frac{1}{n}\sum_{t}(y_t-X_t^\top\beta)^2+\lambda\Big(\alpha\|\beta\|_1+(1-\alpha)\|\beta\|_2^2\Big),
+\]
+where $\alpha\in[0,1]$ controls sparsity and $\lambda$ controls regularization strength. ElasticNet is favored here because it is robust in high-dimensional lag spaces and yields interpretable sparse solutions.
+
+\paragraph{Neural model (MLP).}
+The \textbf{neural} curve is produced by a feed-forward multilayer perceptron (MLP) regressor with early stopping. It represents a flexible nonlinear mapping:
+\[
+\hat{y}_t = f_\theta(X_t),
+\]
+where $f_\theta$ is a composition of affine layers and nonlinearities. The neural model can capture nonlinear interactions between neurons and history terms, but can underperform if the training block is small relative to model capacity or if the true mapping is largely linear.
+
+\paragraph{Atlas-only model (ridge on atlas branches).}
+The \textbf{atlas-only} curve is produced by a ridge regression trained only on features whose branch is one of:
+\[
+\{\text{autoregressive},\ \text{stimulus},\ \text{atlas\_kernel}\}.
+\]
+This isolates the fraction of predictive power that can be explained by (i) the target's own history, (ii) explicit stimulus regressors, and (iii) atlas-kernel filtered versions of inputs (when the atlas provides kernel parameters). Ridge solves:
+\[
+\hat{\beta}=\arg\min_{\beta}\frac{1}{n}\sum_{t}(y_t-X_t^\top\beta)^2+\lambda\|\beta\|_2^2.
+\]
+A high atlas-only $R^2$ can mean either that atlas kernels genuinely capture stimulus propagation \emph{or} that stimulus regressors and autoregressive dynamics dominate prediction (a common regime in periodic-stimulation datasets). Therefore atlas-only performance must be interpreted together with the contributor plots and ablations.
+
+\section{Interpreting key diagnostic plots}
+This section provides concrete interpretation rules for the primary diagnostic plots produced by the notebook.
+
+\paragraph{Joint distribution heatmap.}
+The joint heatmap visualizes the empirical count matrix for discretized $(S,M)$ pairs on a held-out segment. Brighter cells correspond to more frequent co-occurrence of a source bin $s$ and a target bin $m$. 
+\begin{itemize}
+\item A bright diagonal ridge indicates positive association (high values co-occur with high values).
+\item Off-diagonal ridges indicate systematic offsets (e.g., target tends to lag or be larger/smaller than source).
+\item Multiple bright modes indicate mixtures of states (global state switching, stimulus phases, or latent drivers).
+\end{itemize}
+Mutual information increases when the joint occupancy deviates from the product of marginals $p(s)p(m)$; concentrated structure typically yields larger MI.
+
+\paragraph{Cross-correlation curve.}
+The cross-correlation curve plots $r(\tau)$ versus lag. If the peak is at $\tau^\star>0$ under the convention ``positive means target delayed,'' then the source tends to lead the target by $\tau^\star$. A broad peak indicates weakly constrained timing or slow shared dynamics. A narrow peak indicates precise temporal alignment.
+
+\paragraph{MI vs bin count.}
+As bin count increases, discrete MI usually increases because the estimator resolves more fine-grained dependence. However, in finite samples, overly large bin counts induce upward bias due to sparse occupancy. Thus:
+\begin{itemize}
+\item Early growth indicates genuine coarse dependence.
+\item Plateau suggests a stable discretization regime.
+\item Late linear growth can indicate binning-driven inflation.
+\end{itemize}
+This curve is a \emph{diagnostic} for estimator stability, not a proof of the ``true'' MI.
+
+\paragraph{Surrogate null histogram.}
+The surrogate histogram shows the distribution of the test-set delayed correlation under a circular-shift null, which preserves marginal structure while disrupting true temporal alignment. A small $p$-value indicates the observed coupling is unlikely under this null.
+
+\paragraph{Contributor bar plots (linear / atlas-only / neural).}
+Contributor bars are computed by grouped permutation importance: permute all features associated with one neuron (or stimulus regressor) and measure the drop in held-out $R^2$. The resulting percentages quantify \emph{predictive contribution}. They do not prove synaptic causality, but they are useful for identifying which neurons contain the most predictive information for the target trajectory under the fitted model class.
+\section{Artifact-removal diagnostics: detecting under- and over-filtering}
+Because calcium imaging is dominated by slow baseline drift (photobleaching, global brightness variation, motion artifacts), the pipeline produces \textbf{additional diagnostic plots} that compare ``raw'' (unprocessed) signals against the estimated baseline and corrected traces.
+
+\subsection{Baseline overlay (raw vs estimated baseline)}
+For each neuron, we plot the raw fluorescence $F(t)$ together with the estimated baseline $\hat{b}(t)$ (rolling low-percentile filter). If $\hat{b}(t)$ tracks the slow drift while ignoring sharp transients, baseline subtraction is behaving as intended.
+
+\subsection{Corrected vs prepared traces}
+We plot the baseline-subtracted trace $F(t)-\hat{b}(t)$ against the final prepared trace (robust z-scored). If the prepared trace eliminates slow drift while preserving transient structure, over-filtering is unlikely. If fast transients are visibly attenuated or flattened, the bleach window or percentile may be too aggressive.
+
+\subsection{Metric deltas (raw vs filtered)}
+We compute the same pairwise metrics \emph{with} and \emph{without} preprocessing and display them side-by-side:
+\[
+\{r_{\text{test}}, I_{\text{cont}}, I_{\text{disc}}, T_{S\to M}, I_G\}_{\text{raw}} \quad \text{vs} \quad
+\{r_{\text{test}}, I_{\text{cont}}, I_{\text{disc}}, T_{S\to M}, I_G\}_{\text{filtered}}.
+\]
+Interpretation:
+\begin{itemize}[leftmargin=*]
+\item Large drops from raw$\to$filtered typically indicate that apparent coupling was dominated by shared drift (desired).
+\item Minimal change suggests drift was not driving the relationship (good).
+\item If meaningful transients are removed and all metrics collapse, this suggests potential over-filtering; increase the baseline window or lower the percentile aggressiveness.
+\end{itemize}
+\subsection{Surrogate null for transfer entropy (TE)}
+Because discrete plug-in TE is biased under finite samples and nonstationarity, the pipeline also computes a \textbf{TE surrogate null} by circularly shifting the \emph{source} trace relative to the target (preserving target history, which TE conditions on) and recomputing TE at the chosen lag. This yields a null distribution $\{T^{(k)}_{S\to M}\}$ and an empirical p-value:
+\[
+p_{\mathrm{TE}}=\frac{1+\#\{|T^{(k)}_{S\to M}|\ge |T_{S\to M}|\}}{K+1}.
+\]
+\textbf{When it is informative:} when preprocessing has removed shared drift and the remaining dynamics are approximately stationary, this test indicates whether the observed directed predictability exceeds what is expected under an alignment-destroying null that preserves marginal structure and autocorrelation. \textbf{Limitations:} for strongly periodic stimulation, circular shifts may still preserve stimulus-phase structure; stimulus-conditioned surrogates (shuffle within stimulation epochs) are preferable when epoch metadata are available.
+
+\subsection{Entropy visualization and MI upper bound}
+The pipeline computes discrete marginal entropies $H(S)$ and $H(M)$ on the same held-out aligned segment used for MI/TE reporting, using quantile binning into $B$ bins. These entropies are plotted as adjacent bars, and the mutual-information upper bound $\min(H(S),H(M))$ is drawn as a dashed line. To avoid mixing incomparable visual encodings, the observed MI values are shown in a separate ``information metrics'' bar plot (MI$_{\mathrm{cont}}$, MI$_{\mathrm{disc}}$, TE$_{\mathrm{disc}}$, and GPI) rather than as points on the entropy bars.
+
+\end{document}
