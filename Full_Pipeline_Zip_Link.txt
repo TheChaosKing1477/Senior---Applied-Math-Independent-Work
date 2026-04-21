@@ -1,0 +1,3 @@
+This file contains the zip file for the full pipeline as it similarly could not be uploaded directly to Github.
+
+Google Drive Link: https://drive.google.com/drive/folders/1hTQekaCGg01LL7MkcJyH4WGKHa30Ioyq?usp=sharing
