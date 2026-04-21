@@ -1,8 +1,8 @@
-# Unified C. elegans pipeline (unified_v1)
+# Unified C. elegans pipeline (unified_v8)
 
 ## What this is
-A single, coherent codebase that merges the *key functional features* into one workflow:
-- discovery
+A single, coherent codebase that merges the key functional features into one workflow:
+- file discovery
 - loaders (BrainScanner + exported_data)
 - preprocessing (NaN interpolation + photobleach correction + robust z-score)
 - pairwise metrics (lagged correlation + MI + TE + Gaussian predictive information)
