@@ -1,7 +1,7 @@
-# Unified C. elegans pipeline (unified_v8)
+# C. elegans pipeline
 
-## What this is
-A single, coherent codebase that merges the key functional features into one workflow:
+## Summary
+A single codebase that merges the key functional features into one workflow:
 - file discovery
 - loaders (BrainScanner + exported_data)
 - preprocessing (NaN interpolation + photobleach correction + robust z-score)
@@ -40,7 +40,7 @@ Open:
 - This is the primary guardrail against spurious sensory→motor hits.
 
 ### Prediction + contribution weights
-- ElasticNet gives robust baseline, MLP gives nonlinear capacity.
+- ElasticNet gives stable baseline, MLP gives nonlinear capacity.
 - Contributor percentages are grouped permutation importance on held-out data: a predictive, not causal, decomposition.
 - Accuracy: use held-out R²; improvements when toggling interneurons indicate genuine network predictive value.
 
@@ -56,6 +56,7 @@ Update (unified_v2):
 - Fixed multi-dataset training when the chosen target neuron is absent from the reference dataset.
 
 - Added atlas-only contributor bar plot (grouped permutation importance on atlas feature subset).
+- (Note: Atlas implementation is not currently functional.)
 
 Update (unified_v4): Added marginal entropy bar plot H(source), H(target) and MI upper bound min(H) in pair report.
 
